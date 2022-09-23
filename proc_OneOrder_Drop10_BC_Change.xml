@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<process name="Cosmote.OneOrder_Drop10_BC_Change">
+  <activity name="Start" type="seqActivity">
+    <label>Start</label>
+    <x>99.0</x>
+    <y>135.0</y>
+    <childList>
+      <child name="BC_Change" type="subflowActivity">
+        <element>proc_Common.taskExecutionSubflow</element>
+        <label>BC_Change</label>
+        <x>235.0</x>
+        <y>133.0</y>
+        <methodList>
+          <method name="cwOnProcActCond" type="action">
+            <category>cond</category>
+            <system>true</system>
+            <script><![CDATA[
+              // Check Whether This is the only customer contract
+              var process = this.process;
+              var document = this.activityData;
+              var pd = this.process.processDocument;
+              var order = this.process.processOrder;
+              var basket = Basket.readFromDB(order.orderInstance.basketId);
+              var po = basket.getItemByType("ProductOffering");
+              var response = Common.UnserializeDS(pd.response);
+              pd.bc_change_flag = false; // Will be consider if AIR command execution is needed
+
+              for (var i = 0; i < order.relatedObjects.length; i++) {
+                    /** Get Customer_id  */
+                    if (order.relatedObjects[i].relatedObject.name == "orderBasicInfo") {
+                          var Activate = JSON.parse(order.relatedObjects[i].relatedObject.data)
+                    }
+              }
+
+              pd.csId = Activate[0].customer_id;
+              pd.msisdn = Activate[0].main_msisdn.replace("30", "");
+
+              var co_count = [];
+              co_count = "select count(1) from contract_all where customer_id= '" + pd.csId + "' ";
+              var result = [];
+              try {
+                    var result = Global.runSQLQuery("BSCS", "BSCS.sqlReturnDoc", 1, null, co_count);
+              } catch (e) {}
+
+              if (result[0].count == 1) { /// If Customer has only one contract continue
+
+
+
+
+              /*
+                    for (var i = 0; i < order.relatedObjects.length; i++) {
+                          if (order.relatedObjects[i].relatedObject.name == "orderBasicInfo") {
+                                var orderBasicInfo = JSON.parse(order.relatedObjects[i].relatedObject.data);
+                          }
+                    }
+              */
+
+                    for (var i = 0; i < order.relatedObjects.length; i++) {
+                          if (order.relatedObjects[i].relatedObject.name == "CREATED_CO_ID")
+                                pd.CREATED_CO_ID = order.relatedObjects[i].relatedObject.value;
+                    }
+
+
+
+                    // Specifying billCycle of the owner of the contract
+                    var cust_billCycle = [];
+                    var sqlQuery = "";
+                    sqlQuery = sqlQuery + "select BILLCYCLE from BILLCYCLE_ASSIGNMENT_HISTORY a ";
+                    sqlQuery = sqlQuery + " where seqno in (select max(seqno)";
+                    sqlQuery = sqlQuery + " from BILLCYCLE_ASSIGNMENT_HISTORY b";
+                    sqlQuery = sqlQuery + " where a.customer_id=b.customer_id)";
+                    sqlQuery = sqlQuery + " and customer_id = " + pd.csId + " ";
+                    try {
+                          cust_billCycle = Global.runSQLQuery("BSCS", "BSCS.bcReturnDoc", 1, null, sqlQuery);
+                    } catch (e) {}
+
+                    pd.billCycle = cust_billCycle[0].billCycle;
+
+                    // Chack which is the correct Billcycle based on cg_default_bc
+                    var cg_billCycle = [];
+                    var sqlQuery = "";
+                    sqlQuery = sqlQuery + " select billcycle from cg_default_bc ";
+                    sqlQuery = sqlQuery + " where  (select trunc(CH_VALIDFROM) from contract_history where ch_status='a' and co_id= " + pd.CREATED_CO_ID + " )";
+                    sqlQuery = sqlQuery + " between start_date and end_date";
+                    try {
+                          cg_billCycle = Global.runSQLQuery("BSCS", "BSCS.bcReturnDoc", 1, null, sqlQuery);
+                    } catch (e) {}
+
+                    pd.cg_billCycle = cg_billCycle[0].billCycle;
+
+                    // If above BCs are not the same BC change should apply
+
+
+                    if (cust_billCycle[0].billCycle != cg_billCycle[0].billCycle) { // If Customer has not the same BC based on  cg_default_bc continue with BC change
+                           pd.bc_change_flag = true;
+                return true;
+
+
+                    } else {
+                          return false;
+                    }
+
+
+
+              } else {
+                    return false; // Customer does not have only one contract. No BC should be performed
+              }
+            ]]></script>
+          </method>
+          <method name="cwOnProcActBefore" type="action">
+            <category>before</category>
+            <system>true</system>
+            <script><![CDATA[
+              // Check if Customer already belongs to the correct
+              // BC based on cg_default_bc and contract_history.ch_validfrom. If not perfomer BC change.
+
+              // Check if Customer already belongs to the correct
+              // BC based on cg_default_bc and contract_history.ch_validfrom. If not perfomer BC change.
+
+              var pd = this.process.processDocument;
+              var order = this.process.processOrder;
+              var basket = Basket.readFromDB(order.orderInstance.basketId);
+
+
+
+
+              var request = new DataStructure("BSCS18.CustomerWrite18.customerWriteRequest");
+              request.inputAttributes.csBillcycle =       pd.cg_billCycle  ;
+              request.inputAttributes.bcComment = 'EOC BC Change';
+              request.inputAttributes.csId = pd.csId ;
+              request.sessionChangeRequest.values.item[0].key = "BU_ID";
+              request.sessionChangeRequest.values.item[0].value = "2";
+              BSCS.prepareBSCSOperation(pd, "BSCS18.CustomerWrite18.CustomerWriteService", "customerWrite", request);
+            ]]></script>
+          </method>
+        </methodList>
+      </child>
+      <child name="UpdatePAMData" type="subflowActivity">
+        <element>proc_Common.taskExecutionSubflow</element>
+        <label>UpdatePAMData</label>
+        <x>421.0</x>
+        <y>142.0</y>
+        <methodList>
+          <method name="cwOnProcActCond" type="action">
+            <category>cond</category>
+            <system>true</system>
+            <script><![CDATA[
+              var pd = this.process.processDocument;
+              // IF BC change in BSCS is done , OCS should UpdatePAMData
+              if ( pd.bc_change_flag == true ) {
+                     return true;
+              }
+              else {
+                    return false;
+
+              }
+            ]]></script>
+          </method>
+          <method name="cwOnProcActBefore" type="action">
+            <category>before</category>
+            <system>true</system>
+            <script><![CDATA[
+              var process = this.process;
+              var document = this.activityData;
+              var pd = this.process.processDocument;
+              var order = this.process.processOrder;
+
+              for (var i = 0; i < order.relatedObjects.length; i++) {
+                  /** Get Contract_id  */
+                  if (order.relatedObjects[i].relatedObject.name == "orderBasicInfo") {
+                      var Activate = JSON.parse(order.relatedObjects[i].relatedObject.data)
+                  }
+              }
+
+
+              // Specifying Old & New Billcycle
+              var old_billCycle = [];
+              var sqlQuery = "";
+              sqlQuery = sqlQuery + "select SCHEDULE_ID from ocs_bc where billcycle = " + pd.billCycle + " ";
+
+              try{
+                  old_billCycle = Global.runSQLQuery("BSCS", "BSCS.bcReturnDoc", 1, null, sqlQuery);
+              }
+              catch(e){}
+
+
+              var new_billCycle = [];
+              var sqlQuery = "";
+              sqlQuery = sqlQuery + "select SCHEDULE_ID from ocs_bc where billcycle = " +  pd.cg_billCycle + " ";
+
+              try{
+                  new_billCycle = Global.runSQLQuery("BSCS", "BSCS.bcReturnDoc", 1, null, sqlQuery);
+              }
+              catch(e){}
+
+
+
+
+              var request = new DataStructure("CS.methodCall");
+              request.methodName = "UpdatePeriodicAccountManagementData";
+              request.params.param.valueOuter.struct.member[0].name = "originHostName";
+              request.params.param.valueOuter.struct.member[0].value.stringValue = "BEA";
+              request.params.param.valueOuter.struct.member[1].name = "originNodeType";
+              request.params.param.valueOuter.struct.member[1].value.stringValue = "BEA";
+              request.params.param.valueOuter.struct.member[2].name = "originOperatorID";
+              request.params.param.valueOuter.struct.member[2].value.stringValue = "TestOperator";
+              request.params.param.valueOuter.struct.member[3].name = "originTimeStamp";
+              request.params.param.valueOuter.struct.member[3].value.dateTimeValue = cwl_charging.returnImmediateDateTime(new Date());
+              request.params.param.valueOuter.struct.member[4].name = "originTransactionID";
+              request.params.param.valueOuter.struct.member[4].value.stringValue = cwl_charging.generateTransactionID();
+              request.params.param.valueOuter.struct.member[5].name = "pamUpdateInformationList";
+              request.params.param.valueOuter.struct.member[5].value.array.data.valueOuter[0].struct.member[0].name = "pamServiceID" ;
+              request.params.param.valueOuter.struct.member[5].value.array.data.valueOuter[0].struct.member[0].value.integerValue = 1 ;
+              request.params.param.valueOuter.struct.member[5].value.array.data.valueOuter[0].struct.member[1].name = "scheduleIDOld" ;
+              request.params.param.valueOuter.struct.member[5].value.array.data.valueOuter[0].struct.member[1].value.integerValue = old_billCycle[0].billCycle ;
+              request.params.param.valueOuter.struct.member[5].value.array.data.valueOuter[0].struct.member[2].name = "scheduleIDNew" ;
+              request.params.param.valueOuter.struct.member[5].value.array.data.valueOuter[0].struct.member[2].value.integerValue = new_billCycle[0].billCycle ;
+              request.params.param.valueOuter.struct.member[6].name = "subscriberNumber";
+              request.params.param.valueOuter.struct.member[6].value.stringValue = pd.msisdn ;
+
+              CS.prepareCSOperation(pd, "CS.airInterface", "apiCall", request);
+            ]]></script>
+          </method>
+        </methodList>
+      </child>
+      <child name="End" type="completeActivity">
+        <label>End</label>
+        <x>688.0</x>
+        <y>142.0</y>
+        <methodList>
+          <method name="cwOnProcActBefore" type="action">
+            <category>before</category>
+            <system>true</system>
+            <script><![CDATA[cwt_sof.processAction_sendUpdate(process, "complete");]]></script>
+          </method>
+        </methodList>
+      </child>
+    </childList>
+    <methodList>
+      <method name="cwOnProcActCond" type="action">
+        <category>cond</category>
+        <system>true</system>
+        <script><![CDATA[
+          var process = this.process;
+          var document = this.activityData;
+          var pd = this.process.processDocument;
+          var order = this.process.processOrder;
+          var basket = Basket.readFromDB(order.orderInstance.basketId);
+          var po = basket.getItemByType("ProductOffering");
+
+
+          pd.ACT_ORDER = false;
+
+          for (var i = 0; i < po.length; i++) { // Check if it is an Activation Order
+
+              if (po[i].code == "Activation" && (po[i].action == "Activation" || po[i].action == "ACTIVATION")) {
+                  pd.ACT_ORDER = true;
+                  break;
+              }
+          }
+
+          if (pd.ACT_ORDER == true) {
+              return true;
+          } else {
+              cwt_sof.processAction_sendUpdate(process, "complete");
+              return false;
+          }
+        ]]></script>
+      </method>
+    </methodList>
+  </activity>
+  <curRevision>true</curRevision>
+  <document>doc_Common.processDocument</document>
+  <highlight>32</highlight>
+  <label>OneOrder_Drop10_BC_Change</label>
+  <metaVersion>25</metaVersion>
+  <priority>8</priority>
+  <subflowReferenceList>
+    <subflowReference type="sref">
+      <revision>1</revision>
+      <subflow>proc_Common.taskExecutionSubflow</subflow>
+    </subflowReference>
+  </subflowReferenceList>
+  <type>User</type>
+</process>
